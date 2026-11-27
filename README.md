@@ -203,6 +203,7 @@ AmiRenderSwarm/
     ├── main.c              # Conexión al hub, WaitSelect(), PINGs y gestión de eventos
     ├── net.h / net.c         # Inicialización de bsdsocket.library y lectura/escritura de líneas
     ├── proto.h / proto.c     # Cabecera binaria de 16 bytes ("AMIR") y envío/recepción exacta
+    ├── log.h / log.c         # Subsistema de log con timestamp, nivel y etiqueta de componente
     └── worker.h / worker.c   # Listener directo, ejecución de render y devolución de frames
 ```
 
@@ -225,3 +226,77 @@ go run . -addr :7900 -timeout 60s
 cd amiga
 make
 ```
+
+---
+
+## 8. Registro (Logging) del Agente
+
+El agente registra **toda** su ejecución en la consola. Cada línea lleva marca de
+tiempo absoluta, segundos transcurridos desde el arranque, nivel y una etiqueta
+del componente que la emite:
+
+```text
+2026-11-27 10:35:12.340 [T+000003s] [INFO ] [NET] Conectado al Hub en 192.168.18.26:7900 (fd=3)
+2026-11-27 10:35:12.345 [T+000003s] [INFO ] [NET] TX -> HELLO id=amiga_vampire os=3.2 cpu=68080 ...
+2026-11-27 10:35:12.512 [T+000003s] [INFO ] [HUB] WELCOME peer_ip=192.168.18.26 session=s_1a2b3c4d
+2026-11-27 10:35:27.348 [T+000018s] [DEBUG] [PROTO] RX paquete RENDER_DONE frame=1 flags=0 payload=0 bytes
+```
+
+### Niveles
+
+| Nivel    | Contenido |
+| -------- | --------- |
+| `DEBUG`  | Traza fina: bytes leídos/escritos, cada paquete binario, cada línea de señalización, ficheros temporales. **Es el nivel por defecto.** |
+| `INFO`   | Hitos: conexión al hub, `HELLO`/`PING`, invitaciones, inicio y fin de render, recepción de frames. |
+| `WARN`   | Situaciones anómalas que no abortan la ejecución. |
+| `ERROR`  | Fallos que sí abortan la operación o la sesión. |
+
+### Etiquetas de componente
+
+| Etiqueta | Módulo |
+| -------- | ------ |
+| `MAIN`   | Arranque, configuración, bucle principal y apagado. |
+| `NET`    | `bsdsocket.library`, conexión al hub, envío/recepción de líneas. |
+| `PROTO`  | Trama binaria `AMIR` de 16 bytes. |
+| `WORKER` | Listener directo, escritura de ficheros, render y envío del frame. |
+| `DIR`    | Flujo del director: conexión directa al worker y guardado del frame. |
+| `HUB`    | Líneas de señalización recibidas del hub. |
+| `LOG`    | Mensajes del propio subsistema de log. |
+
+### Línea de órdenes
+
+```text
+AmiRenderSwarm <hub_ip> <hub_port> <node_id> <listen_port> [render_cmd_printf]
+                [--log-level <debug|info|warn|error>] [--log-file <ruta>]
+```
+
+- `--log-level <nivel>`: nivel mínimo que se escribe. Por defecto `debug` (todo).
+- `--log-file <ruta>`: copia del log a un fichero, **añadiendo al final** si ya existe.
+  Ejemplo: `--log-file T:amirs_log.txt`. Sólo requiere `dos.library`; no hace falta
+  `Nudos.library` ni `Nuutility.library`.
+- `--help`: muestra el modo de uso y termina.
+
+Las opciones se pueden escribir como `--clave valor` o `--clave=valor`, y pueden
+aparecer en cualquier posición. Los argumentos posicionales mantienen el orden
+original, de modo que las órdenes existentes siguen funcionando sin cambios:
+
+```bash
+AmiRenderSwarm 192.168.18.26 7900 amiga_vampire 7800
+AmiRenderSwarm 192.168.18.26 7900 amiga_vampire 7800 --log-level info
+AmiRenderSwarm 192.168.18.26 7900 amiga_vampire 7800 --log-file=T:amirs_log.txt
+```
+
+### Notas de implementación
+
+- La marca de tiempo se obtiene del `DateStamp()` del **`dos.library` real** del
+  sistema (invocado por LVO, `-192`), no del `DOSBase` del entorno de compilación.
+  El epoch de DOS (1978-01-01) se convierte al calendario gregoriano.
+- `stdout` se configura con salida por líneas y se vacía tras cada mensaje, de
+  modo que los mensajes aparecen en la consola al instante, incluso durante un
+  render largo.
+- El fichero de log se abre con la API de DOS (`Open`/`Seek`/`Write`/`Close`) en
+  lugar de `fopen()`, para no arrastrar dependencias de biblioteca adicionales
+  en el Amiga.
+- El agente **no** envía `PING`s mientras atiende a un director: durante un render
+  largo el hub puede darlo por caducado (`-timeout`, 60 s por defecto). El log
+  deja ver exactamente cuándo empieza y termina cada sesión de render.

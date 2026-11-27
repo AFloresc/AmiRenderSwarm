@@ -3,7 +3,7 @@ CFLAGS  = -O2 -Wall -noixemul -m68020
 LDFLAGS = -noixemul
 
 TARGET  = AmiRenderSwarm
-SRCS    = main.c net.c proto.c worker.c
+SRCS    = main.c net.c proto.c worker.c log.c
 OBJS    = $(SRCS:.c=.o)
 
 all: $(TARGET)
@@ -11,7 +11,7 @@ all: $(TARGET)
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -o $(TARGET) $(OBJS) $(LDFLAGS)
 
-%.o: %.c net.h proto.h worker.h
+%.o: %.c net.h proto.h worker.h log.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
