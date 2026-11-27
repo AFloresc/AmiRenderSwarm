@@ -27,6 +27,9 @@ typedef struct {
 BOOL Amirs_SendPacket(LONG sock, UBYTE type, UBYTE flags, ULONG frame,
                       const void *payload, ULONG payload_len);
 
+/* Nombre legible de un tipo de mensaje binario ("JOB_INIT", "SCENE_CHUNK"...). */
+const char *Amirs_MsgTypeName(UBYTE type);
+
 /* Lee una cabecera de 16 bytes y valida magic.
  * Devuelve:
  *   1  -> cabecera válida leída en out_hdr (en host byte order)
