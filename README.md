@@ -41,6 +41,7 @@ El sistema separa completamente el **plano de control (señalización)** del **p
 2. **Agente AmigaOS (C + `bsdsocket.library`):**
    - Ejecutable único ligero (`AmiRenderSwarm`) capaz de operar en modo **Worker** (escuchando conexiones directas en `listen_port`, por defecto `7800`, y ejecutando el render en `T:`) y en modo **Director** (cuando el usuario lanza un trabajo).
    - Utiliza `WaitSelect()` para esperar simultáneamente actividad en el socket de señalización, latidos periódicos y señales de consola (`SIGBREAKF_CTRL_C`).
+   - Incorpora un **subsistema de registro** (`amiga/log.c`) que vuelca toda la ejecución en la consola con marca de tiempo, nivel y componente de origen. Véase la [sección 8](#8-registro-logging-del-agente).
 
 ---
 
@@ -60,11 +61,13 @@ Transporte: **TCP persistente** con mensajes de una línea terminados en `\n` (`
 Al conectar, el agente envía sus capacidades y puertos:
 
 ```text
-HELLO id=amiga_v4_01 os=3.2 cpu=68080 fpu=1 ram_mb=512 engines=lwsn,povray role=both listen_port=7800
+HELLO id=amiga_v4_01 os=3.2 cpu=68080 fpu=1 ram_mb=256 engines=lwsn,povray role=both listen_port=7800
 ```
 
 - `role`: `worker` (solo ejecuta renders), `director` (solo envía trabajos) o `both` (ambos).
 - `listen_port`: puerto TCP local donde el agente acepta conexiones directas de otros pares.
+
+> El agente anuncia hoy valores fijos (`os=3.2 cpu=68080 fpu=1 ram_mb=256 engines=lwsn,povray role=both`); sólo `id`, `listen_port` y las opciones de la línea de órdenes son configurables.
 
 El servidor responde confirmando la sesión y devolviendo la IP visible detectada:
 
@@ -77,7 +80,7 @@ WELCOME peer_ip=192.168.1.45 session=s_98a12
 Periódicamente el agente reporta que sigue activo para evitar ser expulsado por *timeout*:
 
 ```text
-PING state=IDLE load=0.12
+PING state=IDLE load=0.05
 ```
 
 Respuesta del servidor:
@@ -174,15 +177,22 @@ Una vez completado el emparejamiento, la transferencia de datos ocurre directame
 
 ## 5. Estrategia de Reparto y Tolerancia a Fallos
 
-1. **Cola dinámica (*Pull* por velocidad real):**
+> **Estado de implementación.** El flujo actualmente operativo es el siguiente:
+> el hub reparte invitaciones, el worker acepta, el director envía **una**
+> escena de ejemplo para el frame `1`, el worker la renderiza y devuelve el
+> frame. Los puntos 1, 3 y 4 de esta sección, así como el ajuste de prioridad
+> del punto 2, están **diseñados pero todavía no implementados**. El código
+> manda sobre este documento.
+
+1. **Cola dinámica (*Pull* por velocidad real):** *(previsto)*
    - Dado que las capacidades entre distintos modelos Amiga varían enormemente (por ejemplo, un 68030 frente a un 68080), los fotogramas no se reparten de forma estática al inicio.
    - El Director mantiene la cola de fotogramas pendientes (`1..N`) y entrega el siguiente fotograma libre a cada Worker conforme este devuelve el anterior.
-2. **Aislamiento y ejecución en AmigaOS:**
+2. **Aislamiento y ejecución en AmigaOS:** *(implementado)*
    - Los archivos temporales de escena y salida se escriben en `T:` (`T:amirs_scene_<frame>.dat` y `T:amirs_out_<frame>.dat`) y se eliminan con `DeleteFile()` tras procesarlos.
-   - El comando de render se invoca mediante `SystemTagList()`, permitiendo ajustar prioridades con `SetTaskPri` para mantener fluida la interfaz de Workbench.
-3. **Recuperación ante desconexiones:**
+   - El comando de render se invoca mediante `SystemTagList()`. El ajuste de prioridad con `SetTaskPri` para mantener fluida la interfaz de Workbench está **previsto, no implementado**.
+3. **Recuperación ante desconexiones:** *(previsto)*
    - Si un Worker pierde conexión o supera el tiempo máximo sin entregar su fotograma asignado, el Director devuelve ese `frame` a la cola pendiente para que otro nodo lo procese.
-4. **Conectividad tras NAT:**
+4. **Conectividad tras NAT:** *(previsto)*
    - En LAN o redes *overlay* (WireGuard / Tailscale), los nodos conectan directamente a `ip:port`.
    - Si ambos nodos están tras routers domésticos sin apertura de puertos, el servidor en Go puede ofrecer opcionalmente un *relay* TCP por *token* de sesión manteniendo intacto el protocolo binario de 16 bytes en el cliente Amiga.
 
@@ -193,6 +203,7 @@ Una vez completado el emparejamiento, la transferencia de datos ocurre directame
 ```text
 AmiRenderSwarm/
 ├── README.md
+├── AGENTS.md               # Guía de trabajo del repositorio (build, gotchas y protocolo)
 ├── hub/                    # Servidor de señalización en Go 1.26
 │   ├── go.mod
 │   ├── main.go             # Listener TCP, goroutines por conexión y manejo de señales
@@ -211,10 +222,25 @@ AmiRenderSwarm/
 
 ## 7. Puesta en Marcha y Pruebas
 
+### Requisitos del agente en el Amiga
+
+- **AmigaOS 3.2 o superior** con `68020` como mínimo (el binario se compila con
+  `-m68020`; un 68060 o un Vampire 68080 funcionan perfectamente).
+- Las bibliotecas **`bsdsocket.library`** (Roadshow / AmiTCP) y **`dos.library`**
+  deben estar disponibles. **No** se necesita ninguna otra biblioteca en tiempo
+  de ejecución.
+- Un volumen **`T:`** escribible, donde el worker crea los ficheros temporales
+  `amirs_scene_<frame>.dat` y `amirs_out_<frame>.dat` y donde el director
+  guarda los frames recibidos como `amirs_recv_<frame>.dat`.
+
 ### Arrancar el Hub en Go 1.26
+
+El módulo Go vive en `hub/`; los comandos `go` **no** deben ejecutarse desde la
+raíz del repositorio.
 
 ```bash
 cd hub
+go build ./...        # genera hub.exe
 go run . -addr :7900 -timeout 60s
 ```
 
@@ -222,10 +248,67 @@ go run . -addr :7900 -timeout 60s
 
 ### Compilar el agente para AmigaOS
 
+En una máquina de desarrollo sin toolchain AmigaOS nativo, la vía recomendada es
+el contenedor oficial de cross-compilación, ejecutado **desde la raíz del
+repositorio**:
+
+```bash
+docker run --rm -v "${PWD}:/work" -w /work/amiga amigadev/crosstools:m68k-amigaos make clean all
+```
+
+El `Makefile` usa `-noixemul` de forma obligatoria (requisito de este
+*toolchain*) y produce el ejecutable `amiga/AmiRenderSwarm`.
+
+Si ya se dispone de un `m68k-amigaos-gcc` instalado de forma nativa, basta con:
+
 ```bash
 cd amiga
 make
 ```
+
+> `make clean` borra los ficheros `.o`, que están versionados en Git; un build
+> limpio los regenera de forma idéntica.
+
+### Lanzar el agente en el Amiga
+
+Copia `AmiRenderSwarm` al Amiga y ejecútalo desde una ventana de shell o de
+Consola (CLI) con los argumentos posicionales y, opcionalmente, las opciones de
+registro:
+
+```text
+AmiRenderSwarm <hub_ip> <hub_port> <node_id> <listen_port> [render_cmd_printf]
+                [--log-level <debug|info|warn|error>] [--log-file <ruta>]
+```
+
+Ejemplos:
+
+```bash
+# Nodo worker/director con valores por defecto
+AmiRenderSwarm 192.168.18.26 7900 amiga_vampire 7800
+
+# Con log más silencioso y copia a fichero
+AmiRenderSwarm 192.168.18.26 7900 amiga_vampire 7800 --log-level info --log-file T:amirs_log.txt
+
+# Con plantilla de render propia (%lu = frame, %s = escena, %s = salida)
+AmiRenderSwarm 192.168.18.26 7900 amiga_vampire 7800 'lwsn -i %lu -o %s %s'
+```
+
+Si no se indica `render_cmd_printf`, el worker ejecuta `Copy "<escena>" "<salida>"`
+para validar el transporte binario antes de conectar `lwsn` o `povray`.
+
+### Probar el hub sin Amiga
+
+El hub habla ASCII línea a línea, así que puede ejercitarse con cualquier
+cliente TCP. Con el hub escuchando en `127.0.0.1:7900`:
+
+```text
+HELLO id=smoke os=3.2 cpu=68080 fpu=1 ram_mb=512 engines=lwsn role=both listen_port=7800
+PING state=IDLE load=0.1
+LIST_PEERS engine=lwsn min_ram=64
+```
+
+Respuestas esperadas: `WELCOME peer_ip=... session=...`, `PONG ts=...` y una
+línea `PEER ...` por cada par disponible, cerrada con `PEERS_END count=N`.
 
 ---
 
